@@ -7,18 +7,17 @@ use std::time::Duration;
 use relentless::retry;
 use relentless::stop;
 use relentless::wait;
-use relentless::RetryState;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Poll `f` at fixed 10ms intervals until it returns `Ok` or 5s elapses.
-fn poll_until<T>(f: impl FnMut(RetryState) -> Result<T, ()>) -> Result<T, ()> {
-    retry(f)
+/// Poll `f` at fixed 10ms intervals until it yields `Some`, or give up after 5s.
+fn poll_until<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+    retry(move |_| f())
         .wait(wait::fixed(POLL_INTERVAL))
         .stop(stop::elapsed(POLL_TIMEOUT))
         .call()
-        .map_err(|_| ())
+        .ok()
 }
 
 /// Process information gathered via platform-specific backends.
@@ -107,26 +106,20 @@ pub fn daemonize_bin() -> std::path::PathBuf {
 
 /// Wait for a pidfile to appear and return its contents as a PID.
 pub fn wait_for_pidfile(path: &Path) -> Option<u32> {
-    poll_until(|_| {
+    poll_until(|| {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|c| c.trim().parse::<u32>().ok())
-            .ok_or(())
     })
-    .ok()
 }
 
 /// Wait for a process to die.
 pub fn wait_for_exit(pid: u32) -> bool {
-    poll_until(|_| {
-        let ret = unsafe { libc::kill(pid as i32, 0) };
-        if ret != 0 {
-            Ok(())
-        } else {
-            Err(())
-        }
+    poll_until(|| {
+        let dead = unsafe { libc::kill(pid as i32, 0) } != 0;
+        dead.then_some(())
     })
-    .is_ok()
+    .is_some()
 }
 
 /// Kill a process (best-effort).
@@ -140,13 +133,10 @@ pub fn kill_process(pid: u32) {
 ///
 /// On timeout, returns whatever content exists for better assertion messages.
 pub fn wait_for_file_content(path: &Path, expected: &str) -> String {
-    match poll_until(|_| {
+    poll_until(|| {
         std::fs::read_to_string(path)
             .ok()
             .filter(|c| c.contains(expected))
-            .ok_or(())
-    }) {
-        Ok(content) => content,
-        Err(_) => std::fs::read_to_string(path).unwrap_or_default(),
-    }
+    })
+    .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default())
 }
