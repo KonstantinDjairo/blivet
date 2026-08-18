@@ -42,8 +42,56 @@ check-cross:
     {{cargo}} check {{locked}} --target x86_64-unknown-freebsd
     {{cargo}} check {{locked}} --target x86_64-unknown-netbsd
 
+# Lowest rustc that must be able to *resolve* the dev-dependency graph: the
+# rust OpenBSD ships via `pkg_add rust` (Tier 3, no rustup), which the openbsd
+# smoke job runs `cargo test --lib` under. Bump when OpenBSD packages a newer
+# rust; that is also what unblocks the serial_test ignore in dependabot.yml.
+openbsd_rust := "1.90"
+
+# Fail if a resolved dependency declares a rust-version too high for the
+# toolchains CI must satisfy. Two floors, because the failure modes differ:
+#
+#   runtime deps (normal + build) — must fit this crate's MSRV, or consumers
+#       on that MSRV cannot build blivet at all.
+#   dev-dependencies — need only fit {{openbsd_rust}}, the oldest rustc that
+#       runs our test suite. Over-declaring is common (heapless declares 1.87
+#       yet compiles on 1.85), so holding dev-deps to the crate MSRV would
+#       reject working graphs.
+#
+# Cargo is not a backstop for either: the toolchain the msrv job pins (1.85)
+# predates the resolver diagnostic and silently compiled serial_test 4.x
+# (rust-version 1.93.1) — only OpenBSD's 1.90 cargo, which does enforce,
+# caught it. Reading metadata directly holds on every toolchain.
+msrv-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    msrv=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.packages[] | select(.name == "blivet") | .rust_version')
+    [ -n "$msrv" ] && [ "$msrv" != "null" ] || { echo "no rust-version in Cargo.toml"; exit 1; }
+    runtime=$(cargo tree -e normal,build --prefix none {{locked}} \
+        | awk 'NF >= 2 { sub(/^v/, "", $2); print $1 "@" $2 }' | sort -u)
+    offenders=$(cargo metadata --format-version 1 {{locked}} \
+        --filter-platform "$(rustc -vV | sed -n 's/^host: //p')" \
+        | jq -r '.packages[] | select(.rust_version != null) | "\(.name)@\(.version) \(.rust_version)"' \
+        | while read -r pkg req; do
+            if grep -qxF "$pkg" <<<"$runtime"; then
+                floor=$msrv kind=runtime
+            else
+                floor={{openbsd_rust}} kind=dev
+            fi
+            [ "$(printf '%s\n%s\n' "$floor" "$req" | sort -V | head -1)" = "$req" ] \
+                || echo "  $pkg ($kind) requires rustc $req > $floor"
+        done)
+    if [ -n "$offenders" ]; then
+        echo "dependencies exceed the supported rustc floor:"
+        echo "$offenders"
+        echo "pin the dependency back, or raise the floor deliberately"
+        exit 1
+    fi
+    echo "dependencies fit MSRV $msrv (runtime) and {{openbsd_rust}} (dev)"
+
 # Run all static checks
-check: fmt-check lint lint-deny doc check-cross
+check: fmt-check lint lint-deny doc msrv-check check-cross
 
 # Run tests (excludes ignored root/Linux tests)
 test:

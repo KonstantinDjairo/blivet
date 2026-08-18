@@ -9,6 +9,7 @@ pkgs.mkShell {
   packages = with pkgs; [
     rustup
     just
+    jq
     pre-commit
     docker-client
     nodejs

@@ -37,6 +37,10 @@ jobs:
       - name: CI
         run: just ci
 
+  # Proves the crate still *compiles* on its MSRV. It cannot prove dependency
+  # rust-version declarations fit: cargo 1.85 predates the resolver diagnostic
+  # and builds a dep demanding 1.93 without complaint. `just msrv-check` (in
+  # the `ci` job) is what enforces the declarations.
   msrv:
     runs-on: ubuntu-latest
     steps:
